@@ -1,0 +1,9 @@
+{
+  "drinkType": "cold brew",
+  "size": "medium",
+  "milk": "soy",
+  "extras": [
+    "vanilla syrup"
+  ],
+  "name": "Ajith"
+}

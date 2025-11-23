@@ -1,0 +1,9 @@
+{
+  "drinkType": "americano",
+  "size": "medium",
+  "milk": "almond",
+  "extras": [
+    "sugar-free syrup"
+  ],
+  "name": "Ajit Kumar"
+}
