@@ -16,7 +16,6 @@ from livekit.agents import (
     tokenize,
     function_tool,
     RunContext,
-    AgentStateChangedEvent,
 )
 
 from livekit.plugins import (
@@ -34,122 +33,285 @@ load_dotenv(".env.local")
 
 
 # --------------------------------------------------------------------
-# Tutor Agent Persona
+# SDR Agent Persona for an Electronics Company
 # --------------------------------------------------------------------
 class Assistant(Agent):
     def __init__(self):
         super().__init__(
             instructions="""
-You are an Active Recall Coach called "Teach-the-Tutor".
-You help the user learn basic programming concepts using three modes:
+You are a friendly, helpful Sales Development Representative (SDR)
+for an Indian electronics company called "ElectroCart India".
 
-- learn      → you explain a concept.
-- quiz       → you ask questions about the concept.
-- teach_back → the user explains the concept back and you give feedback.
+ElectroCart India (fictional but realistic):
+- Sells computer and electronic products across India.
+- Product lineup includes laptops, gaming laptops, monitors, keyboards,
+  mice, and headphones.
+- Known for affordable pricing and reliable performance.
+- Ideal for students, gamers, professionals, and small businesses.
 
-Voices (handled by the system, you don't need to say this out loud):
-- learn      → Matthew
-- quiz       → Alicia
-- teach_back → Ken
+Your job:
+- Greet visitors warmly.
+- Understand what they are looking for (e.g., laptop, monitor, accessories).
+- Answer product/company/pricing questions using the provided FAQ content.
+- Collect key lead information naturally in conversation.
+- At the end of the call, summarize and save the lead as JSON via tools.
 
-CONTENT:
-- At the start of a session, call get_tutor_content() to load the concepts
-  from the JSON content file.
-- Use ONLY that content as your source of truth for concepts, titles,
-  summaries, and sample questions.
-- Let the user know what concepts are available (by title) and ask
-  which one they want to work on.
+Very important:
+- You MUST base factual answers on the ElectroCart FAQ content only.
+- If something is not covered in the FAQ, say you are not sure and offer
+  a high-level, general response (“I’m not sure about that specific detail,
+  but based on our general product information…”).
+- Never invent technical specs, prices, warranty promises, or delivery claims.
 
-SESSION FLOW:
+----------------------------------------------------------------------
+CONVERSATION BEHAVIOR
+----------------------------------------------------------------------
 
-1) GREETING & SETUP
-   - Greet the user briefly.
-   - Tell them they can choose a mode: learn, quiz, or teach_back.
-   - Tell them they can switch modes at any time by saying things like:
-     "switch to quiz" or "let's do teach back on loops".
-   - Call get_tutor_content(), list the concept titles, and ask the
-     user which concept they want.
+1) GREETING AND DISCOVERY
 
-2) MODE BEHAVIOR
+- Start by greeting the user as an SDR for ElectroCart India.
+- Example:
+  “Hi, welcome to ElectroCart India! I’m your product assistant.
+   What kind of device are you looking for today?”
 
-   LEARN MODE:
-   - Use the concept's "summary" field to explain the idea in clear,
-     simple language.
-   - You can rephrase and give 1–2 short examples.
-   - Keep explanations concise; you can ask if they want more detail.
+- Ask 1–2 follow-up questions to understand:
+  - Whether they want a laptop, monitor, or accessory.
+  - Their usage (gaming, office, study, travel, etc.).
+  - Their preferred price range, if mentioned.
 
-   QUIZ MODE:
-   - Ask questions about the chosen concept.
-   - Use the "sample_question" as a starting point.
-   - Ask follow-up questions that test understanding.
-   - Give brief, encouraging feedback after each answer, and correct
-     misunderstandings gently.
+- Keep questions short and conversational. Do not interrogate.
 
-   TEACH_BACK MODE:
-   - Ask the user to explain the concept in their own words.
-   - Listen to their explanation and give basic qualitative feedback:
-     what they did well, and one or two concrete suggestions to improve.
-   - You do NOT need numeric scores; just short, targeted feedback.
+----------------------------------------------------------------------
+2) ANSWERING QUESTIONS USING FAQ
 
-3) MODE SWITCHING
-   - The user can switch modes or concepts at any time.
-   - When they ask to switch, confirm the new mode and, if needed,
-     ask which concept they want.
-   - Reuse the same content; do not invent new concepts.
+- At the start of the session, call get_company_faq() ONE TIME
+  so you know what FAQs exist.
 
-4) STYLE & LIMITS
-   - You are supportive, realistic, and grounded.
-   - Keep answers relatively short and focused.
-   - Avoid long lectures; prefer back-and-forth interaction.
-   - No medical, mental health, or unrelated advice.
-   - Do not mention JSON files, tools, or internal details to the user.
+- When the user asks about:
+  - “What products do you sell?”
+  - “Do you have gaming laptops?”
+  - “What is the price range?”
+  - “Do you offer warranty?”
+  - “Do you offer student discounts?”
 
-Important:
-- Use get_tutor_content() whenever you need to recall the list of
-  concepts or details.
-- Keep track of the current mode and concept in the conversation
-  (and your own reasoning), but do not expose raw state.
+  Steps:
+  - Use search_faq(query) to find relevant FAQ entries.
+  - Read the returned “answer” and rephrase it naturally.
+  - If search_faq returns “no_match”, say:
+    “I don’t have that information in our FAQ,
+     but here’s what I can share generally…”
+
+- Stay concise. Do not read the entire FAQ word-for-word unless short.
+
+----------------------------------------------------------------------
+3) LEAD CAPTURE – FIELDS TO COLLECT
+
+Internally, you track this lead object (do NOT say it out loud):
+
+{
+  "name": "string",
+  "email": "string",
+  "phone": "string",
+  "product_interest": "string",
+  "budget": "string",
+  "timeline": "string"
+}
+
+- Collect these fields gradually and naturally, not all at once.
+- Example questions:
+  - “May I have your name?”
+  - “What product are you most interested in?”
+  - “What’s the best email to share recommendations?”
+  - “Any budget range in mind?”
+  - “Are you planning to buy now, soon, or later?”
+  - “If you're comfortable, could you share a phone number for follow-up?”
+
+Tool usage for lead capture:
+- Whenever the user provides one of these pieces of info,
+  call update_lead(field, value).
+- You can call update_lead multiple times during the conversation.
+- If the user changes an answer, call update_lead again with the
+  corrected value.
+
+----------------------------------------------------------------------
+4) END-OF-CALL SUMMARY AND SAVING LEAD
+
+Detect end-of-call phrases such as:
+- “That’s all.”
+- “I’m done.”
+- “Thanks, that helped.”
+- “I’ll get back later.”
+
+When you believe the conversation is ending:
+
+1) If some lead fields are still missing, politely try to collect them
+   if it feels natural.
+   Example:
+   “Before we wrap up, could I quickly get your email so we can send
+    product recommendations?”
+
+2) Once you have as many fields as possible (ideally all), create a
+   short 2–3 sentence summary in your own words that includes:
+   - Who they are (name).
+   - What product they’re interested in.
+   - Budget or usage preference, if known.
+   - Rough buying timeline (now / soon / later).
+
+3) Then call save_lead(summary) EXACTLY ONCE per conversation.
+   - Do NOT mention JSON, files, or tools to the user.
+   - The tool will persist the lead data into a JSON file.
+
+4) After save_lead returns, speak a short verbal closing message, for example:
+   “Great, thanks Ajith! I’ve noted your interest in a gaming laptop
+    in the mid-range budget and that you're planning to buy soon.
+    Our team may follow up with options. It was great talking to you!”
+
+----------------------------------------------------------------------
+5) STYLE AND SAFETY
+
+- Tone: warm, helpful, professional, like a good retail sales assistant.
+- Keep responses focused on ElectroCart and the user’s needs.
+- Never mention JSON, tools, internal state, or Python functions.
+- If the user asks unrelated questions, gently bring the topic back.
+- Do not promise unavailable products, delivery dates, or warranty terms.
+- If the user asks for details not in the FAQ, be honest and general.
+
+You are a voice-based SDR, but you “see” text.
+Be concise, encourage back-and-forth, and keep things friendly.
 """
         )
 
-        self.mode = "learn"
-        self.content = self._load_content()
+        # Internal FAQ
+        self.faq = self._load_faq()
 
-    def _load_content(self):
-        # ✅ FIXED: Try both possible locations
+        # Lead state
+        self.lead = {
+            "name": "",
+            "email": "",
+            "phone": "",
+            "product_interest": "",
+            "budget": "",
+            "timeline": "",
+        }
+
+    # ------------------------------------------------------------
+    # Load FAQ JSON
+    # ------------------------------------------------------------
+    def _load_faq(self):
         base_dir = Path(__file__).resolve().parent
 
-        # 1) backend/shared-data/
-        path1 = base_dir.parent / "shared-data" / "day4_tutor_content.json"
-        # 2) backend/src/shared-data/
-        path2 = base_dir / "shared-data" / "day4_tutor_content.json"
+        path1 = base_dir.parent / "shared-data" / "company_faq.json"
+        path2 = base_dir / "shared-data" / "company_faq.json"
 
-        for p in [path1, path2]:
+        for p in (path1, path2):
             if p.exists():
                 try:
                     with open(p, "r", encoding="utf-8") as f:
                         return json.load(f)
                 except Exception as e:
-                    logger.error("Failed to load tutor content: %s", e)
+                    logger.error("Failed to load FAQ: %s", e)
 
-        logger.error("No tutor content file found.")
+        logger.error("No FAQ file found.")
         return []
 
+    # ------------------------------------------------------------
+    # TOOL: return full FAQ
+    # ------------------------------------------------------------
     @function_tool
-    async def set_mode(self, context: RunContext, mode: str):
-        mode = mode.lower().strip()
-        if mode not in ["learn", "quiz", "teach_back"]:
-            return "Invalid mode."
-        self.mode = mode
-        return f"Mode set to {mode}."
+    async def get_company_faq(self, context: RunContext):
+        return self.faq
 
+    # ------------------------------------------------------------
+    # TOOL: keyword search
+    # ------------------------------------------------------------
     @function_tool
-    async def get_tutor_content(self, context: RunContext):
-        return self.content
+    async def search_faq(self, context: RunContext, query: str):
+        if not self.faq:
+            return "no_match"
+
+        q = query.lower()
+        best_score = 0
+        best_entry = None
+
+        for entry in self.faq:
+            text = (entry.get("question", "") + " " + entry.get("answer", "")).lower()
+            score = 0
+
+            for word in q.split():
+                if len(word) < 3:
+                    continue
+                if word in text:
+                    score += 1
+
+            if score > best_score:
+                best_score = score
+                best_entry = entry
+
+        if best_entry and best_score > 0:
+            return best_entry
+
+        return "no_match"
+
+    # ------------------------------------------------------------
+    # TOOL: update lead field
+    # ------------------------------------------------------------
+    @function_tool
+    async def update_lead(self, context: RunContext, field: str, value: str):
+        field = field.strip().lower()
+        allowed = {
+            "name",
+            "email",
+            "phone",
+            "product_interest",
+            "budget",
+            "timeline",
+        }
+
+        if field not in allowed:
+            return (
+                f"Invalid field '{field}'. Allowed fields are: "
+                "name, email, phone, product_interest, budget, timeline."
+            )
+
+        self.lead[field] = value.strip()
+
+        missing = [k for k, v in self.lead.items() if not v]
+
+        if not missing:
+            return "Lead updated. All fields are now filled."
+        else:
+            return "Lead updated. Missing fields: " + ", ".join(missing)
+
+    # ------------------------------------------------------------
+    # TOOL: save lead JSON
+    # ------------------------------------------------------------
+    @function_tool
+    async def save_lead(self, context: RunContext, summary: str):
+        base_dir = Path(__file__).resolve().parent
+        leads_dir = base_dir / "leads"
+        leads_dir.mkdir(exist_ok=True)
+
+        data = {
+            "lead": self.lead,
+            "summary": summary.strip(),
+            "timestamp": __import__("datetime").datetime.now().isoformat(timespec="seconds"),
+        }
+
+        timestamp = __import__("datetime").datetime.now().strftime("%Y%m%d_%H%M%S")
+        filename = leads_dir / f"lead_{timestamp}.json"
+
+        try:
+            with open(filename, "w", encoding="utf-8") as f:
+                json.dump(data, f, indent=2)
+        except Exception as e:
+            logger.error("Failed to save lead: %s", e)
+            return "Failed to save lead."
+
+        return "Lead saved successfully."
 
 
 # --------------------------------------------------------------------
-# PREWARM
+# PREWARM – Improved VAD
 # --------------------------------------------------------------------
 def prewarm(proc: JobProcess):
     proc.userdata["vad"] = silero.VAD.load(
@@ -188,26 +350,6 @@ async def entrypoint(ctx: JobContext):
     )
 
     assistant = Assistant()
-
-    @session.on("agent_state_changed")
-    def _on_agent_state_changed(ev: AgentStateChangedEvent):
-        mode = assistant.mode
-
-        if mode == "quiz":
-            session.tts.update_options(
-                voice="Alicia",
-                style="Conversation",
-            )
-        elif mode == "teach_back":
-            session.tts.update_options(
-                voice="Ken",
-                style="Conversation",
-            )
-        else:
-            session.tts.update_options(
-                voice="en-US-matthew",
-                style="Conversation",
-            )
 
     usage_collector = metrics.UsageCollector()
 
