@@ -1,7 +1,9 @@
+# agent.py
 import logging
 import os
 import json
 from pathlib import Path
+from datetime import datetime, timezone
 
 from dotenv import load_dotenv
 from livekit.agents import (
@@ -9,6 +11,7 @@ from livekit.agents import (
     AgentSession,
     JobContext,
     JobProcess,
+    MetricsCollectedEvent,
     RoomInputOptions,
     WorkerOptions,
     cli,
@@ -17,307 +20,219 @@ from livekit.agents import (
     function_tool,
     RunContext,
 )
-
-from livekit.plugins import (
-    murf,
-    google,
-    deepgram,
-    silero,
-    noise_cancellation,
-)
-
+from livekit.plugins import murf, google, deepgram, silero, noise_cancellation
 from livekit.plugins.turn_detector.multilingual import MultilingualModel
 
 logger = logging.getLogger("agent")
+logger.setLevel(logging.INFO)
 load_dotenv(".env.local")
 
 
 # --------------------------------------------------------------------
-# SDR Agent Persona for an Electronics Company
+# Fraud Alert Voice Agent Persona (Day 6)
 # --------------------------------------------------------------------
 class Assistant(Agent):
-    def __init__(self):
+    def __init__(self) -> None:
         super().__init__(
             instructions="""
-You are a friendly, helpful Sales Development Representative (SDR)
-for an Indian electronics company called "ElectroCart India".
+You are a calm, professional Fraud Alert Representative for a fictional
+bank called "SafeTrust Bank". This is a demo agent and you will never ask
+for real card numbers, PINs, passwords, or any other sensitive credentials.
 
-ElectroCart India (fictional but realistic):
-- Sells computer and electronic products across India.
-- Product lineup includes laptops, gaming laptops, monitors, keyboards,
-  mice, and headphones.
-- Known for affordable pricing and reliable performance.
-- Ideal for students, gamers, professionals, and small businesses.
+When a fraud alert session begins:
+- Greet the user and explain you are calling about a suspicious transaction.
+- Ask the user's name to locate the case.
+- Verify identity using one non-sensitive security question from the case
+  (for example: last merchant, last 4 digits masked, or a pre-set security phrase).
+- If verification passes: read out the suspicious transaction details:
+  merchant, amount, masked card, approximate time/category/source.
+- Ask the user: "Did you make this transaction?" Expect a yes/no answer.
+- If user confirms -> mark the case as confirmed_safe and say what happens:
+  e.g. "Thanks — we'll mark this as safe."
+- If user denies -> mark the case as confirmed_fraud and describe mock actions:
+  e.g. "We'll block the card and open a dispute. Our fraud team will follow up."
+- If verification fails -> set status verification_failed and end politely.
 
-Your job:
-- Greet visitors warmly.
-- Understand what they are looking for (e.g., laptop, monitor, accessories).
-- Answer product/company/pricing questions using the provided FAQ content.
-- Collect key lead information naturally in conversation.
-- At the end of the call, summarize and save the lead as JSON via tools.
+Persistence:
+- Fraud cases are stored in a local JSON file (fraud_cases.json).
+- Use the tools get_case_by_name(username) and update_case_status(case_id, status, note)
+  to read and write the database.
+- Do not mention file names or JSON to the user. Speak only plain, friendly sentences.
 
-Very important:
-- You MUST base factual answers on the ElectroCart FAQ content only.
-- If something is not covered in the FAQ, say you are not sure and offer
-  a high-level, general response (“I’m not sure about that specific detail,
-  but based on our general product information…”).
-- Never invent technical specs, prices, warranty promises, or delivery claims.
+Safety:
+- Use only fake/demo data.
+- Do not request or process real sensitive data.
 
-----------------------------------------------------------------------
-CONVERSATION BEHAVIOR
-----------------------------------------------------------------------
-
-1) GREETING AND DISCOVERY
-
-- Start by greeting the user as an SDR for ElectroCart India.
-- Example:
-  “Hi, welcome to ElectroCart India! I’m your product assistant.
-   What kind of device are you looking for today?”
-
-- Ask 1–2 follow-up questions to understand:
-  - Whether they want a laptop, monitor, or accessory.
-  - Their usage (gaming, office, study, travel, etc.).
-  - Their preferred price range, if mentioned.
-
-- Keep questions short and conversational. Do not interrogate.
-
-----------------------------------------------------------------------
-2) ANSWERING QUESTIONS USING FAQ
-
-- At the start of the session, call get_company_faq() ONE TIME
-  so you know what FAQs exist.
-
-- When the user asks about:
-  - “What products do you sell?”
-  - “Do you have gaming laptops?”
-  - “What is the price range?”
-  - “Do you offer warranty?”
-  - “Do you offer student discounts?”
-
-  Steps:
-  - Use search_faq(query) to find relevant FAQ entries.
-  - Read the returned “answer” and rephrase it naturally.
-  - If search_faq returns “no_match”, say:
-    “I don’t have that information in our FAQ,
-     but here’s what I can share generally…”
-
-- Stay concise. Do not read the entire FAQ word-for-word unless short.
-
-----------------------------------------------------------------------
-3) LEAD CAPTURE – FIELDS TO COLLECT
-
-Internally, you track this lead object (do NOT say it out loud):
-
-{
-  "name": "string",
-  "email": "string",
-  "phone": "string",
-  "product_interest": "string",
-  "budget": "string",
-  "timeline": "string"
-}
-
-- Collect these fields gradually and naturally, not all at once.
-- Example questions:
-  - “May I have your name?”
-  - “What product are you most interested in?”
-  - “What’s the best email to share recommendations?”
-  - “Any budget range in mind?”
-  - “Are you planning to buy now, soon, or later?”
-  - “If you're comfortable, could you share a phone number for follow-up?”
-
-Tool usage for lead capture:
-- Whenever the user provides one of these pieces of info,
-  call update_lead(field, value).
-- You can call update_lead multiple times during the conversation.
-- If the user changes an answer, call update_lead again with the
-  corrected value.
-
-----------------------------------------------------------------------
-4) END-OF-CALL SUMMARY AND SAVING LEAD
-
-Detect end-of-call phrases such as:
-- “That’s all.”
-- “I’m done.”
-- “Thanks, that helped.”
-- “I’ll get back later.”
-
-When you believe the conversation is ending:
-
-1) If some lead fields are still missing, politely try to collect them
-   if it feels natural.
-   Example:
-   “Before we wrap up, could I quickly get your email so we can send
-    product recommendations?”
-
-2) Once you have as many fields as possible (ideally all), create a
-   short 2–3 sentence summary in your own words that includes:
-   - Who they are (name).
-   - What product they’re interested in.
-   - Budget or usage preference, if known.
-   - Rough buying timeline (now / soon / later).
-
-3) Then call save_lead(summary) EXACTLY ONCE per conversation.
-   - Do NOT mention JSON, files, or tools to the user.
-   - The tool will persist the lead data into a JSON file.
-
-4) After save_lead returns, speak a short verbal closing message, for example:
-   “Great, thanks Ajith! I’ve noted your interest in a gaming laptop
-    in the mid-range budget and that you're planning to buy soon.
-    Our team may follow up with options. It was great talking to you!”
-
-----------------------------------------------------------------------
-5) STYLE AND SAFETY
-
-- Tone: warm, helpful, professional, like a good retail sales assistant.
-- Keep responses focused on ElectroCart and the user’s needs.
-- Never mention JSON, tools, internal state, or Python functions.
-- If the user asks unrelated questions, gently bring the topic back.
-- Do not promise unavailable products, delivery dates, or warranty terms.
-- If the user asks for details not in the FAQ, be honest and general.
-
-You are a voice-based SDR, but you “see” text.
-Be concise, encourage back-and-forth, and keep things friendly.
+Keep replies short, professional, and reassuring.
 """
         )
 
-        # Internal FAQ
-        self.faq = self._load_faq()
+        # in-memory cases and the file path we loaded from (set by _load_cases)
+        self._cases = []
+        self._cases_file = None
+        self._cases = self._load_cases()
 
-        # Lead state
-        self.lead = {
-            "name": "",
-            "email": "",
-            "phone": "",
-            "product_interest": "",
-            "budget": "",
-            "timeline": "",
-        }
-
-    # ------------------------------------------------------------
-    # Load FAQ JSON
-    # ------------------------------------------------------------
-    def _load_faq(self):
+    # -------------------------
+    # Internal: load fraud cases
+    # -------------------------
+    def _load_cases(self):
         base_dir = Path(__file__).resolve().parent
+        # Candidate locations (prefer local file in same dir)
+        candidates = [
+            base_dir / "fraud_cases.json",
+            base_dir.parent / "shared-data" / "fraud_cases.json",
+            base_dir / "shared-data" / "fraud_cases.json",
+        ]
 
-        path1 = base_dir.parent / "shared-data" / "company_faq.json"
-        path2 = base_dir / "shared-data" / "company_faq.json"
-
-        for p in (path1, path2):
+        for p in candidates:
             if p.exists():
                 try:
                     with open(p, "r", encoding="utf-8") as f:
-                        return json.load(f)
+                        data = json.load(f)
+                    logger.info("Loaded fraud cases from %s", p)
+                    # store the path we loaded from so updates write back here
+                    self._cases_file = p
+                    return data if isinstance(data, list) else []
                 except Exception as e:
-                    logger.error("Failed to load FAQ: %s", e)
+                    logger.error("Failed to load fraud cases from %s: %s", p, e)
 
-        logger.error("No FAQ file found.")
-        return []
+        # If none found, create local empty file and use that
+        fallback = base_dir / "fraud_cases.json"
+        try:
+            if not fallback.exists():
+                fallback.parent.mkdir(parents=True, exist_ok=True)
+                with open(fallback, "w", encoding="utf-8") as f:
+                    json.dump([], f, indent=2)
+                logger.info("Created new fraud cases file at %s", fallback)
+            self._cases_file = fallback
+            return []
+        except Exception as e:
+            logger.error("Failed to create fallback fraud_cases.json: %s", e)
+            self._cases_file = None
+            return []
 
-    # ------------------------------------------------------------
-    # TOOL: return full FAQ
-    # ------------------------------------------------------------
+    # -------------------------
+    # TOOL: get a fraud case by username
+    # -------------------------
     @function_tool
-    async def get_company_faq(self, context: RunContext):
-        return self.faq
+    async def get_case_by_name(self, context: RunContext, username: str):
+        """
+        Return the most recent pending fraud case for the given username.
+        If none found, return the string 'no_case'.
+        """
+        username_norm = (username or "").strip().lower()
+        if not username_norm:
+            return "no_case"
 
-    # ------------------------------------------------------------
-    # TOOL: keyword search
-    # ------------------------------------------------------------
+        matches = [c for c in self._cases if c.get("userName", "").strip().lower() == username_norm]
+        if not matches:
+            return "no_case"
+
+        # return the most recent by transactionTime if present
+        def ts_key(c):
+            t = c.get("transactionTime")
+            if not t:
+                return datetime.min
+            # try common formats: already ISO or "YYYY-MM-DD HH:MM" etc.
+            try:
+                # Try ISO first
+                return datetime.fromisoformat(t)
+            except Exception:
+                try:
+                    # fallback parse common format
+                    return datetime.strptime(t, "%Y-%m-%d %H:%M")
+                except Exception:
+                    return datetime.min
+
+        matches.sort(key=ts_key, reverse=True)
+        return matches[0]
+
+    # -------------------------
+    # TOOL: update case status and persist to disk
+    # -------------------------
     @function_tool
-    async def search_faq(self, context: RunContext, query: str):
-        if not self.faq:
-            return "no_match"
+    async def update_case_status(self, context: RunContext, case_id: str, status: str, note: str):
+        """
+        Update case status and persist to disk.
+        case_id: can be the securityIdentifier or caseId (string)
+        status: one of confirmed_safe, confirmed_fraud, verification_failed
+        note: short note to append
+        Returns:
+            - "case_updated" on success
+            - "no_such_case" if not found
+            - "failed_to_save" if write fails
+        """
+        if not case_id:
+            return "no_such_case"
 
-        q = query.lower()
-        best_score = 0
-        best_entry = None
+        # try to find by matching securityIdentifier OR caseId
+        target = None
+        for c in self._cases:
+            sec = str(c.get("securityIdentifier", "")).strip()
+            cid = str(c.get("caseId", "")).strip()
+            if sec and sec == str(case_id).strip():
+                target = c
+                break
+            if cid and cid == str(case_id).strip():
+                target = c
+                break
 
-        for entry in self.faq:
-            text = (entry.get("question", "") + " " + entry.get("answer", "")).lower()
-            score = 0
+        if not target:
+            logger.warning("update_case_status: no case matched id=%s", case_id)
+            return "no_such_case"
 
-            for word in q.split():
-                if len(word) < 3:
-                    continue
-                if word in text:
-                    score += 1
+        # update in-memory
+        target["status"] = status
+        # append or set outcome note
+        prev_note = target.get("notes") or target.get("outcome_note") or ""
+        # keep previous notes and append short new one
+        combined_note = (prev_note + " | " if prev_note else "") + (note or "")
+        target["notes"] = combined_note
+        target["last_updated"] = datetime.now(timezone.utc).isoformat()
 
-            if score > best_score:
-                best_score = score
-                best_entry = entry
-
-        if best_entry and best_score > 0:
-            return best_entry
-
-        return "no_match"
-
-    # ------------------------------------------------------------
-    # TOOL: update lead field
-    # ------------------------------------------------------------
-    @function_tool
-    async def update_lead(self, context: RunContext, field: str, value: str):
-        field = field.strip().lower()
-        allowed = {
-            "name",
-            "email",
-            "phone",
-            "product_interest",
-            "budget",
-            "timeline",
-        }
-
-        if field not in allowed:
-            return (
-                f"Invalid field '{field}'. Allowed fields are: "
-                "name, email, phone, product_interest, budget, timeline."
-            )
-
-        self.lead[field] = value.strip()
-
-        missing = [k for k, v in self.lead.items() if not v]
-
-        if not missing:
-            return "Lead updated. All fields are now filled."
-        else:
-            return "Lead updated. Missing fields: " + ", ".join(missing)
-
-    # ------------------------------------------------------------
-    # TOOL: save lead JSON
-    # ------------------------------------------------------------
-    @function_tool
-    async def save_lead(self, context: RunContext, summary: str):
-        base_dir = Path(__file__).resolve().parent
-        leads_dir = base_dir / "leads"
-        leads_dir.mkdir(exist_ok=True)
-
-        data = {
-            "lead": self.lead,
-            "summary": summary.strip(),
-            "timestamp": __import__("datetime").datetime.now().isoformat(timespec="seconds"),
-        }
-
-        timestamp = __import__("datetime").datetime.now().strftime("%Y%m%d_%H%M%S")
-        filename = leads_dir / f"lead_{timestamp}.json"
+        # decide path to write to
+        write_path = self._cases_file
+        if write_path is None:
+            # fallback local path next to agent.py
+            write_path = Path(__file__).resolve().parent / "fraud_cases.json"
 
         try:
-            with open(filename, "w", encoding="utf-8") as f:
-                json.dump(data, f, indent=2)
+            write_path.parent.mkdir(parents=True, exist_ok=True)
+            with open(write_path, "w", encoding="utf-8") as f:
+                json.dump(self._cases, f, indent=2, ensure_ascii=False)
+            logger.info("Updated fraud cases written to %s", write_path)
+            return "case_updated"
         except Exception as e:
-            logger.error("Failed to save lead: %s", e)
-            return "Failed to save lead."
+            logger.error("Failed to persist updated fraud cases to %s: %s", write_path, e)
+            return "failed_to_save"
 
-        return "Lead saved successfully."
+    # -------------------------
+    # TOOL: list all cases (for debugging)
+    # -------------------------
+    @function_tool
+    async def list_cases(self, context: RunContext):
+        # return a small view (don't leak sensitive details if any)
+        safe_list = []
+        for c in self._cases:
+            safe_list.append({
+                "caseId": c.get("caseId"),
+                "userName": c.get("userName"),
+                "transactionName": c.get("transactionName"),
+                "transactionTime": c.get("transactionTime"),
+                "status": c.get("status"),
+            })
+        return safe_list
 
 
 # --------------------------------------------------------------------
-# PREWARM – Improved VAD
+# PREWARM: load VAD
 # --------------------------------------------------------------------
 def prewarm(proc: JobProcess):
+    # Silero VAD tuned slightly sensitive for demo environment
     proc.userdata["vad"] = silero.VAD.load(
-        activation_threshold=0.35,
-        min_speech_duration=0.10,
-        min_silence_duration=0.45,
+        activation_threshold=0.40,
+        min_speech_duration=0.08,
+        min_silence_duration=0.4,
     )
 
 
@@ -327,34 +242,38 @@ def prewarm(proc: JobProcess):
 async def entrypoint(ctx: JobContext):
     ctx.log_context_fields = {"room": ctx.room.name}
 
-    base_tts = murf.TTS(
+    # Configure STT for accurate capture
+    stt = deepgram.STT(
+        model="nova-3",
+        language="en-US",
+        interim_results=False,
+        punctuate=True,
+        smart_format=True,
+    )
+
+    # Murf TTS voice for agent (friendly, calm)
+    tts = murf.TTS(
         voice="en-US-matthew",
         style="Conversation",
-        tokenizer=tokenize.basic.SentenceTokenizer(min_sentence_len=2),
+        tokenizer=tokenize.basic.SentenceTokenizer(min_sentence_len=1),
         text_pacing=True,
     )
 
     session = AgentSession(
-        stt=deepgram.STT(
-            model="nova-3",
-            language="en-US",
-            interim_results=True,
-            punctuate=True,
-            smart_format=True,
-        ),
+        stt=stt,
         llm=google.LLM(model="gemini-2.5-flash"),
-        tts=base_tts,
+        tts=tts,
         vad=ctx.proc.userdata["vad"],
         turn_detection=MultilingualModel(),
         preemptive_generation=True,
     )
 
-    assistant = Assistant()
-
+    # metrics
     usage_collector = metrics.UsageCollector()
 
     @session.on("metrics_collected")
-    def _on_metrics(ev):
+    def _on_metrics_collected(ev: MetricsCollectedEvent):
+        metrics.log_metrics(ev.metrics)
         usage_collector.collect(ev.metrics)
 
     async def log_usage():
@@ -362,12 +281,11 @@ async def entrypoint(ctx: JobContext):
 
     ctx.add_shutdown_callback(log_usage)
 
+    # Start session with the fraud assistant
     await session.start(
-        agent=assistant,
+        agent=Assistant(),
         room=ctx.room,
-        room_input_options=RoomInputOptions(
-            noise_cancellation=noise_cancellation.BVC(),
-        ),
+        room_input_options=RoomInputOptions(noise_cancellation=noise_cancellation.BVC()),
     )
 
     await ctx.connect()
@@ -377,9 +295,4 @@ async def entrypoint(ctx: JobContext):
 # MAIN
 # --------------------------------------------------------------------
 if __name__ == "__main__":
-    cli.run_app(
-        WorkerOptions(
-            entrypoint_fnc=entrypoint,
-            prewarm_fnc=prewarm,
-        )
-    )
+    cli.run_app(WorkerOptions(entrypoint_fnc=entrypoint, prewarm_fnc=prewarm))
