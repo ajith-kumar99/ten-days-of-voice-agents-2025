@@ -25,214 +25,290 @@ from livekit.plugins.turn_detector.multilingual import MultilingualModel
 
 logger = logging.getLogger("agent")
 logger.setLevel(logging.INFO)
+
 load_dotenv(".env.local")
 
 
 # --------------------------------------------------------------------
-# Fraud Alert Voice Agent Persona (Day 6)
+# Food & Grocery Ordering Assistant (Day 7)
 # --------------------------------------------------------------------
 class Assistant(Agent):
     def __init__(self) -> None:
         super().__init__(
             instructions="""
-You are a calm, professional Fraud Alert Representative for a fictional
-bank called "SafeTrust Bank". This is a demo agent and you will never ask
-for real card numbers, PINs, passwords, or any other sensitive credentials.
-
-When a fraud alert session begins:
-- Greet the user and explain you are calling about a suspicious transaction.
-- Ask the user's name to locate the case.
-- Verify identity using one non-sensitive security question from the case
-  (for example: last merchant, last 4 digits masked, or a pre-set security phrase).
-- If verification passes: read out the suspicious transaction details:
-  merchant, amount, masked card, approximate time/category/source.
-- Ask the user: "Did you make this transaction?" Expect a yes/no answer.
-- If user confirms -> mark the case as confirmed_safe and say what happens:
-  e.g. "Thanks — we'll mark this as safe."
-- If user denies -> mark the case as confirmed_fraud and describe mock actions:
-  e.g. "We'll block the card and open a dispute. Our fraud team will follow up."
-- If verification fails -> set status verification_failed and end politely.
-
-Persistence:
-- Fraud cases are stored in a local JSON file (fraud_cases.json).
-- Use the tools get_case_by_name(username) and update_case_status(case_id, status, note)
-  to read and write the database.
-- Do not mention file names or JSON to the user. Speak only plain, friendly sentences.
-
-Safety:
-- Use only fake/demo data.
-- Do not request or process real sensitive data.
-
-Keep replies short, professional, and reassuring.
+You are a friendly Food & Grocery Ordering Assistant for a small store.
+You help the user build a cart by voice and place an order saved on the backend.
+Rules (short and strict):
+- Greet the user and explain you can add items, list the cart, modify quantities, and place the order.
+- At each clarification ask short questions (size, quantity, brand) if ambiguous.
+- Support "ingredients for X" requests using a small recipes mapping.
+- Use the provided tools below: get_catalog(), add_item(), remove_item(), list_cart(), place_order().
+- Do NOT expose internal file names or JSON; speak natural sentences only.
+- Keep replies concise and confirm all cart changes.
 """
         )
 
-        # in-memory cases and the file path we loaded from (set by _load_cases)
-        self._cases = []
-        self._cases_file = None
-        self._cases = self._load_cases()
+        # Load catalog on startup
+        self.catalog = self._load_catalog()
+
+        # Simple recipes mapping (dish -> list of catalog item names)
+        # Agent can expand this mapping or use tags from catalog if needed
+        self.recipes = {
+            "peanut butter sandwich": ["bread", "peanut butter"],
+            "pasta for two": ["pasta", "tomato sauce", "olive oil"],
+            "eggs and toast": ["eggs", "bread", "butter"],
+        }
+
+        # Cart structure: list of dicts { item_id, name, qty, unit_price }
+        self.cart = []
 
     # -------------------------
-    # Internal: load fraud cases
+    # Internal: load catalog JSON
     # -------------------------
-    def _load_cases(self):
+    def _load_catalog(self):
+        """
+        Tries multiple locations for a catalog file:
+          - <agent_dir>/catalog.json
+          - <agent_dir>/shared-data/catalog.json
+          - <agent_dir>/../shared-data/catalog.json
+        Expected catalog format: list of items with fields:
+        id (optional), name, category, price (number or string), tags (optional)
+        """
         base_dir = Path(__file__).resolve().parent
-        # Candidate locations (prefer local file in same dir)
         candidates = [
-            base_dir / "fraud_cases.json",
-            base_dir.parent / "shared-data" / "fraud_cases.json",
-            base_dir / "shared-data" / "fraud_cases.json",
+            base_dir / "catalog.json",
+            base_dir / "shared-data" / "catalog.json",
+            base_dir.parent / "shared-data" / "catalog.json",
         ]
-
         for p in candidates:
             if p.exists():
                 try:
                     with open(p, "r", encoding="utf-8") as f:
                         data = json.load(f)
-                    logger.info("Loaded fraud cases from %s", p)
-                    # store the path we loaded from so updates write back here
-                    self._cases_file = p
+                    logger.info("Loaded catalog from %s", p)
                     return data if isinstance(data, list) else []
                 except Exception as e:
-                    logger.error("Failed to load fraud cases from %s: %s", p, e)
-
-        # If none found, create local empty file and use that
-        fallback = base_dir / "fraud_cases.json"
-        try:
-            if not fallback.exists():
-                fallback.parent.mkdir(parents=True, exist_ok=True)
-                with open(fallback, "w", encoding="utf-8") as f:
-                    json.dump([], f, indent=2)
-                logger.info("Created new fraud cases file at %s", fallback)
-            self._cases_file = fallback
-            return []
-        except Exception as e:
-            logger.error("Failed to create fallback fraud_cases.json: %s", e)
-            self._cases_file = None
-            return []
+                    logger.error("Failed to load catalog %s: %s", p, e)
+        logger.warning("No catalog.json found; starting with empty catalog.")
+        return []
 
     # -------------------------
-    # TOOL: get a fraud case by username
+    # TOOL: expose catalog
     # -------------------------
     @function_tool
-    async def get_case_by_name(self, context: RunContext, username: str):
+    async def get_catalog(self, context: RunContext):
         """
-        Return the most recent pending fraud case for the given username.
-        If none found, return the string 'no_case'.
+        Returns the loaded catalog as a list of items.
         """
-        username_norm = (username or "").strip().lower()
-        if not username_norm:
-            return "no_case"
+        return self.catalog
 
-        matches = [c for c in self._cases if c.get("userName", "").strip().lower() == username_norm]
-        if not matches:
-            return "no_case"
+    # -------------------------
+    # TOOL: add item to cart
+    # -------------------------
+    @function_tool
+    async def add_item(self, context: RunContext, item_name: str, qty: int = 1, note: str = ""):
+        """
+        Add an item to the cart by name (fuzzy match / keyword).
+        If the catalog contains an exact name (case-insensitive) it will use that item.
+        qty is an integer (defaults to 1). Returns a short status string.
+        """
+        if not item_name:
+            return "No item specified."
 
-        # return the most recent by transactionTime if present
-        def ts_key(c):
-            t = c.get("transactionTime")
-            if not t:
-                return datetime.min
-            # try common formats: already ISO or "YYYY-MM-DD HH:MM" etc.
+        # normalize input
+        q = item_name.strip().lower()
+
+        # try exact name match first
+        match = None
+        for item in self.catalog:
+            if item.get("name", "").strip().lower() == q:
+                match = item
+                break
+
+        # fallback: substring match on name or tags
+        if not match:
+            for item in self.catalog:
+                name = item.get("name", "").lower()
+                tags = " ".join(item.get("tags", [])).lower() if item.get("tags") else ""
+                if q in name or q in tags:
+                    match = item
+                    break
+
+        if not match:
+            return f"Sorry, I couldn't find '{item_name}' in the catalog."
+
+        # parse price (try numeric, else try removing currency)
+        price_raw = match.get("price", 0)
+        try:
+            unit_price = float(price_raw)
+        except Exception:
+            # strip non-digit characters and parse
             try:
-                # Try ISO first
-                return datetime.fromisoformat(t)
+                unit_price = float("".join(c for c in str(price_raw) if (c.isdigit() or c == ".")))
             except Exception:
-                try:
-                    # fallback parse common format
-                    return datetime.strptime(t, "%Y-%m-%d %H:%M")
-                except Exception:
-                    return datetime.min
+                unit_price = 0.0
 
-        matches.sort(key=ts_key, reverse=True)
-        return matches[0]
+        item_id = match.get("id") or match.get("name")
+
+        # if item already in cart, increment qty
+        for c in self.cart:
+            if str(c["item_id"]) == str(item_id):
+                c["qty"] = c.get("qty", 1) + max(1, int(qty))
+                if note:
+                    c.setdefault("notes", []).append(note)
+                return f"Added {qty} more {match.get('name')} to your cart."
+
+        # else add new entry
+        cart_entry = {
+            "item_id": item_id,
+            "name": match.get("name"),
+            "qty": max(1, int(qty)),
+            "unit_price": unit_price,
+        }
+        if note:
+            cart_entry["notes"] = [note]
+
+        self.cart.append(cart_entry)
+        return f"Added {cart_entry['qty']} x {cart_entry['name']} to your cart."
 
     # -------------------------
-    # TOOL: update case status and persist to disk
+    # TOOL: remove item from cart
     # -------------------------
     @function_tool
-    async def update_case_status(self, context: RunContext, case_id: str, status: str, note: str):
+    async def remove_item(self, context: RunContext, item_name: str, qty: int = 0):
         """
-        Update case status and persist to disk.
-        case_id: can be the securityIdentifier or caseId (string)
-        status: one of confirmed_safe, confirmed_fraud, verification_failed
-        note: short note to append
-        Returns:
-            - "case_updated" on success
-            - "no_such_case" if not found
-            - "failed_to_save" if write fails
+        Remove qty of item_name from cart. If qty <= 0 or qty >= existing, remove the item entirely.
+        Returns status string.
         """
-        if not case_id:
-            return "no_such_case"
+        if not item_name:
+            return "No item specified to remove."
 
-        # try to find by matching securityIdentifier OR caseId
-        target = None
-        for c in self._cases:
-            sec = str(c.get("securityIdentifier", "")).strip()
-            cid = str(c.get("caseId", "")).strip()
-            if sec and sec == str(case_id).strip():
-                target = c
-                break
-            if cid and cid == str(case_id).strip():
-                target = c
+        q = item_name.strip().lower()
+        found = None
+        for c in self.cart:
+            if q in c["name"].lower():
+                found = c
                 break
 
-        if not target:
-            logger.warning("update_case_status: no case matched id=%s", case_id)
-            return "no_such_case"
+        if not found:
+            return f"Item '{item_name}' not found in your cart."
 
-        # update in-memory
-        target["status"] = status
-        # append or set outcome note
-        prev_note = target.get("notes") or target.get("outcome_note") or ""
-        # keep previous notes and append short new one
-        combined_note = (prev_note + " | " if prev_note else "") + (note or "")
-        target["notes"] = combined_note
-        target["last_updated"] = datetime.now(timezone.utc).isoformat()
+        if qty <= 0 or qty >= found["qty"]:
+            self.cart.remove(found)
+            return f"Removed {found['name']} from your cart."
+        else:
+            found["qty"] = max(0, found["qty"] - int(qty))
+            return f"Removed {qty} of {found['name']}. Remaining {found['qty']}."
 
-        # decide path to write to
-        write_path = self._cases_file
-        if write_path is None:
-            # fallback local path next to agent.py
-            write_path = Path(__file__).resolve().parent / "fraud_cases.json"
+    # -------------------------
+    # TOOL: list cart
+    # -------------------------
+    @function_tool
+    async def list_cart(self, context: RunContext):
+        """
+        Return a serializable cart summary: items, qty, unit_price, line_total and total.
+        """
+        lines = []
+        total = 0.0
+        for c in self.cart:
+            qty = int(c.get("qty", 1))
+            unit = float(c.get("unit_price", 0.0) or 0.0)
+            line = {"name": c.get("name"), "qty": qty, "unit_price": unit, "line_total": round(qty * unit, 2)}
+            total += line["line_total"]
+            lines.append(line)
 
+        return {"items": lines, "total": round(total, 2)}
+
+    # -------------------------
+    # TOOL: add recipe (ingredients) to cart
+    # -------------------------
+    @function_tool
+    async def add_recipe(self, context: RunContext, recipe_name: str, servings: int = 1):
+        """
+        Add items mapped by recipe_name to cart. Recipe lookup is case-insensitive.
+        """
+        if not recipe_name:
+            return "No recipe specified."
+
+        rn = recipe_name.strip().lower()
+        ingredients = self.recipes.get(rn)
+        if not ingredients:
+            return f"Sorry, I don't know the ingredients for '{recipe_name}'."
+
+        added_items = []
+        for ing in ingredients:
+            # add one of each ingredient per serving
+            res = await self.add_item(context, ing, qty=max(1, int(servings)))
+            added_items.append(res)
+
+        return "Added recipe ingredients to cart: " + "; ".join(added_items)
+
+    # -------------------------
+    # TOOL: place order (save cart)
+    # -------------------------
+    @function_tool
+    async def place_order(self, context: RunContext, customer_name: str = "", address: str = "", note: str = ""):
+        """
+        Finalize the current cart and save an order JSON to disk under 'orders' next to this file.
+        Returns a short confirmation string.
+        """
+        if not self.cart:
+            return "Your cart is empty."
+
+        base_dir = Path(__file__).resolve().parent
+        orders_dir = base_dir / "orders"
+        orders_dir.mkdir(parents=True, exist_ok=True)
+
+        # prepare order summary
+        items = []
+        total = 0.0
+        for c in self.cart:
+            qty = int(c.get("qty", 1))
+            unit = float(c.get("unit_price", 0.0) or 0.0)
+            line_total = round(qty * unit, 2)
+            items.append({"name": c.get("name"), "qty": qty, "unit_price": unit, "line_total": line_total})
+            total += line_total
+
+        order = {
+            "order_id": datetime.now(timezone.utc).strftime("ORD%Y%m%d%H%M%S"),
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "customer_name": customer_name or "Guest",
+            "address": address or "",
+            "items": items,
+            "total": round(total, 2),
+            "note": note or "",
+            "status": "received",
+        }
+
+        filename = orders_dir / f"{order['order_id']}.json"
         try:
-            write_path.parent.mkdir(parents=True, exist_ok=True)
-            with open(write_path, "w", encoding="utf-8") as f:
-                json.dump(self._cases, f, indent=2, ensure_ascii=False)
-            logger.info("Updated fraud cases written to %s", write_path)
-            return "case_updated"
+            with open(filename, "w", encoding="utf-8") as f:
+                json.dump(order, f, indent=2, ensure_ascii=False)
+            # clear the cart after successful save
+            self.cart = []
+            logger.info("Order saved to %s", filename)
         except Exception as e:
-            logger.error("Failed to persist updated fraud cases to %s: %s", write_path, e)
-            return "failed_to_save"
+            logger.error("Failed to save order: %s", e)
+            return "Failed to place your order due to a server error."
+
+        return f"Order placed. Your order id is {order['order_id']}. We'll send confirmation shortly."
 
     # -------------------------
-    # TOOL: list all cases (for debugging)
+    # TOOL: get recipes (for listing)
     # -------------------------
     @function_tool
-    async def list_cases(self, context: RunContext):
-        # return a small view (don't leak sensitive details if any)
-        safe_list = []
-        for c in self._cases:
-            safe_list.append({
-                "caseId": c.get("caseId"),
-                "userName": c.get("userName"),
-                "transactionName": c.get("transactionName"),
-                "transactionTime": c.get("transactionTime"),
-                "status": c.get("status"),
-            })
-        return safe_list
+    async def get_recipes(self, context: RunContext):
+        return list(self.recipes.keys())
 
 
 # --------------------------------------------------------------------
-# PREWARM: load VAD
+# PREWARM – Silero VAD tuned for demo
 # --------------------------------------------------------------------
 def prewarm(proc: JobProcess):
-    # Silero VAD tuned slightly sensitive for demo environment
     proc.userdata["vad"] = silero.VAD.load(
-        activation_threshold=0.40,
+        activation_threshold=0.35,
         min_speech_duration=0.08,
-        min_silence_duration=0.4,
+        min_silence_duration=0.40,
     )
 
 
@@ -242,20 +318,20 @@ def prewarm(proc: JobProcess):
 async def entrypoint(ctx: JobContext):
     ctx.log_context_fields = {"room": ctx.room.name}
 
-    # Configure STT for accurate capture
+    # STT tuned reasonably for conversational capture
     stt = deepgram.STT(
         model="nova-3",
         language="en-US",
-        interim_results=False,
+        interim_results=True,
         punctuate=True,
         smart_format=True,
     )
 
-    # Murf TTS voice for agent (friendly, calm)
+    # TTS voice
     tts = murf.TTS(
         voice="en-US-matthew",
         style="Conversation",
-        tokenizer=tokenize.basic.SentenceTokenizer(min_sentence_len=1),
+        tokenizer=tokenize.basic.SentenceTokenizer(min_sentence_len=2),
         text_pacing=True,
     )
 
@@ -268,7 +344,6 @@ async def entrypoint(ctx: JobContext):
         preemptive_generation=True,
     )
 
-    # metrics
     usage_collector = metrics.UsageCollector()
 
     @session.on("metrics_collected")
@@ -281,7 +356,7 @@ async def entrypoint(ctx: JobContext):
 
     ctx.add_shutdown_callback(log_usage)
 
-    # Start session with the fraud assistant
+    # start the assistant agent
     await session.start(
         agent=Assistant(),
         room=ctx.room,

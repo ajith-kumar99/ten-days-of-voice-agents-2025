@@ -1,0 +1,29 @@
+{
+  "order_id": "ORD20251128130611",
+  "timestamp": "2025-11-28T13:06:11.103934+00:00",
+  "customer_name": "Ajith",
+  "address": "Ongole",
+  "items": [
+    {
+      "name": "Bread",
+      "qty": 1,
+      "unit_price": 40.0,
+      "line_total": 40.0
+    },
+    {
+      "name": "Peanut Butter",
+      "qty": 1,
+      "unit_price": 120.0,
+      "line_total": 120.0
+    },
+    {
+      "name": "Milk (1L)",
+      "qty": 1,
+      "unit_price": 50.0,
+      "line_total": 50.0
+    }
+  ],
+  "total": 210.0,
+  "note": "",
+  "status": "received"
+}

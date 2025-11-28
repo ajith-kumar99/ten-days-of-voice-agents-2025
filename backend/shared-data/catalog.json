@@ -1,0 +1,11 @@
+[
+  {"id":"bread","name":"Bread","category":"Groceries","price":"40","tags":["bakery"]},
+  {"id":"peanut butter","name":"Peanut Butter","category":"Groceries","price":"120","tags":["spread"]},
+  {"id":"pasta","name":"Pasta","category":"Groceries","price":"80","tags":["pasta"]},
+  {"id":"tomato sauce","name":"Tomato Sauce","category":"Groceries","price":"90","tags":["sauce"]},
+  {"id":"olive oil","name":"Olive Oil","category":"Groceries","price":"250","tags":["oil"]},
+  {"id":"eggs","name":"Eggs","category":"Groceries","price":"60","tags":["dairy"]},
+  {"id":"butter","name":"Butter","category":"Groceries","price":"120","tags":["dairy"]},
+  {"id":"milk","name":"Milk (1L)","category":"Groceries","price":"50","tags":["dairy"]},
+  {"id":"apple","name":"Apple (1kg)","category":"Fruits","price":"150","tags":["fruit"]}
+]
