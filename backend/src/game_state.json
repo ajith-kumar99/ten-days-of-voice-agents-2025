@@ -1,0 +1,48 @@
+{
+  "meta": {
+    "created_at": "2025-11-29T13:57:58.729474+00:00",
+    "last_saved": "2025-11-29T14:00:32.691270+00:00"
+  },
+  "player": {
+    "name": "Cipher",
+    "hp": 10,
+    "inventory": [
+      "short sword",
+      "torch"
+    ],
+    "location": "rooftop"
+  },
+  "locations": {
+    "rooftop": {
+      "title": "Rooftop Over Arasaka Tower",
+      "description": "A wet rooftop under neon rain. You can see a maintenance hatch; a drone patrols above.",
+      "visited": true
+    }
+  },
+  "events": [
+    {
+      "time": "2025-11-29T13:59:04.237703+00:00",
+      "type": "skill_check",
+      "skill": "combat",
+      "dc": 15,
+      "roll": 7,
+      "result": "failure"
+    },
+    {
+      "time": "2025-11-29T13:59:24.864865+00:00",
+      "type": "skill_check",
+      "skill": "agility",
+      "dc": 13,
+      "roll": 20,
+      "result": "critical_success"
+    },
+    {
+      "time": "2025-11-29T13:59:52.929857+00:00",
+      "type": "skill_check",
+      "skill": "combat",
+      "dc": 15,
+      "roll": 16,
+      "result": "success"
+    }
+  ]
+}
